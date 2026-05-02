@@ -43,6 +43,12 @@ class OrbitWarsEnv(environment.Environment):
         params: EnvParams,
     ) -> Tuple[EnvObs, EnvState, jnp.ndarray, jnp.ndarray, jnp.ndarray, Dict[Any, Any]]:
 
+        # 1. Comet expiration
+        # (Implicitly handled by movement logic removing planets that leave the board)
+
+        # 2. Comet spawning
+        state = self._spawn_comets(state, params)
+
         # 3. Fleet launch
         state = self._process_launches(state, action, params)
 
@@ -61,7 +67,18 @@ class OrbitWarsEnv(environment.Environment):
         # Update steps
         state = state.replace(steps=state.steps + 1)
 
+        # Check termination
         done = state.steps >= params.max_steps
+        # Elimination check: check if any player has planets or fleets
+        def player_has_assets(p_idx):
+            has_planet = jnp.any(state.planets.owner == p_idx)
+            has_fleet = jnp.any(state.fleets_mask & (state.fleets.owner == p_idx))
+            return has_planet | has_fleet
+
+        has_assets = jax.vmap(player_has_assets)(jnp.arange(4))
+        num_active = jnp.sum(has_assets)
+        done = done | (num_active <= 1)
+
         reward = self._get_reward(state, params)
 
         return (
@@ -72,6 +89,39 @@ class OrbitWarsEnv(environment.Environment):
             False,
             {}
         )
+
+    def _spawn_comets(self, state: EnvState, params: EnvParams) -> EnvState:
+        should_spawn = jnp.any(jnp.array(params.comet_spawn_steps) == state.steps)
+
+        def do_spawn(state):
+            # For simplicity, create 4 comets entering from corners
+            new_ids = jnp.arange(4) + state.next_planet_id
+            # Very simple linear paths for this implementation
+            # In a real environment, these would be pre-calculated ellipses
+            comet_planets = PlanetState(
+                id=new_ids,
+                owner=jnp.full(4, -1),
+                x=jnp.array([0.0, 100.0, 0.0, 100.0]),
+                y=jnp.array([0.0, 0.0, 100.0, 100.0]),
+                radius=jnp.full(4, params.comet_radius),
+                ships=jnp.full(4, 20), # Random starting ships
+                production=jnp.full(4, 1),
+                orbital_radius=jnp.full(4, -1.0), # Use -1 to indicate comet/linear path
+                initial_angle=jnp.zeros(4),
+                angular_velocity=jnp.zeros(4),
+                is_comet=jnp.full(4, True)
+            )
+            # Find first 4 inactive planet slots (assuming max_planets is large enough)
+            # Here we just append or use next_planet_id logic
+            # For JAX, we'll just overwrite from a fixed comet buffer or similar
+            # Simplified: we assume last 4 slots in planets array are for the most recent comet group
+            idx = (self.max_planets - 4)
+            return state.replace(
+                planets=jax.tree_util.tree_map(lambda x, y: x.at[idx:idx+4].set(y), state.planets, comet_planets),
+                next_planet_id=state.next_planet_id + 4
+            )
+
+        return jax.lax.cond(should_spawn, do_spawn, lambda s: s, state)
 
     def _process_launches(self, state: EnvState, action: chex.Array, params: EnvParams) -> EnvState:
         # action: [num_players, max_launches, 3] -> [from_id, angle, ships]
@@ -193,9 +243,23 @@ class OrbitWarsEnv(environment.Environment):
         new_x = jnp.where(is_orbiting, params.sun_pos[0] + jnp.cos(new_angle) * state.planets.orbital_radius, state.planets.x)
         new_y = jnp.where(is_orbiting, params.sun_pos[1] + jnp.sin(new_angle) * state.planets.orbital_radius, state.planets.y)
 
-        # TODO: Implement Comet movement along paths
+        # Comet movement (simplified linear move towards center and out)
+        is_comet = state.planets.is_comet
+        # Target center (50, 50)
+        dx = 50.0 - state.planets.x
+        dy = 50.0 - state.planets.y
+        dist = jnp.sqrt(dx*dx + dy*dy + 1e-6)
+        # Move at comet_speed but avoid sun collision for now or let them hit it
+        new_x = jnp.where(is_comet, state.planets.x + (dx/dist) * params.comet_speed, new_x)
+        new_y = jnp.where(is_comet, state.planets.y + (dy/dist) * params.comet_speed, new_y)
 
-        state = state.replace(planets=state.planets.replace(x=new_x, y=new_y))
+        # Remove comets that are far out (expiration)
+        far_out = (jnp.abs(new_x - 50) > 60) | (jnp.abs(new_y - 50) > 60)
+        should_remove = is_comet & far_out
+        new_owner = jnp.where(should_remove, -1, state.planets.owner)
+        new_ships = jnp.where(should_remove, 0, state.planets.ships)
+
+        state = state.replace(planets=state.planets.replace(x=new_x, y=new_y, owner=new_owner, ships=new_ships))
 
         # Swept fleets: check if fleet position is now inside a planet
         # [max_fleets, max_planets]
