@@ -43,3 +43,18 @@ The environment is implemented in `src/orbit_wars/env.py` using JAX for high-per
 
 - **Improve Heuristics:** Edit `kits/python/bot.py` to implement more advanced strategies like predicting orbital positions or multi-planet coordination.
 - **Training:** Since the environment is built with JAX, you can use it with Reinforcement Learning frameworks to train a bot.
+
+## Submitting to the Competition
+
+To submit your bot to the competition (e.g., on Kaggle):
+
+1.  **Single File:** Ensure your bot logic is contained within a single Python file (like `kits/python/bot.py`).
+2.  **Agent Function:** The file must have a function named `agent(obs)` that returns the list of moves.
+3.  **No External Dependencies:** The environment usually provides `numpy`. Avoid using other libraries that aren't part of the standard competition environment.
+4.  **Submission:** Upload the `.py` file through the competition's submission portal.
+
+If the competition requires a specific format (like a `tar.gz` for Lux AI), you can create it using:
+```bash
+cd kits/python && tar -czf submission.tar.gz main.py bot.py
+```
+(Note: You may need a `main.py` that imports your bot.)
